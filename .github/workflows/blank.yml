@@ -1,0 +1,35 @@
+name: 压缩“初中”文件夹
+
+on:
+  push:
+    branches: [ main, master ]   # 推送到主分支时触发
+  workflow_dispatch:             # 允许手动触发
+
+jobs:
+  compress:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 检查“初中”文件夹是否存在
+        id: check
+        run: |
+          if [ -d "初中" ]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: 压缩文件夹
+        if: steps.check.outputs.exists == 'true'
+        run: |
+          zip -r 初中.zip 初中/
+
+      - name: 上传压缩包作为 Artifact
+        if: steps.check.outputs.exists == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: 初中压缩包
+          path: 初中.zip
+          retention-days: 7      # 保留天数，根据需要调整

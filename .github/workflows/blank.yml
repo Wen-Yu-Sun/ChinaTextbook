@@ -1,9 +1,14 @@
-name: 压缩“高中”文件夹
+name: 压缩“高中”文件夹（支持子文件夹）
 
 on:
   push:
-    branches: [ main, master, ALL ]   # 当推送到main或master分支时触发
-  workflow_dispatch:             # 支持手动触发
+    branches: [ main, master, ALL ]   # 推荐去掉 "ALL"
+  workflow_dispatch:
+    inputs:
+      subfolder:
+        description: '要压缩的子文件夹路径（相对于“高中”），留空则压缩整个“高中”'
+        required: false
+        default: '语文,英语,数学,物理,化学'
 
 jobs:
   compress:
@@ -12,22 +17,82 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v4
 
-      - name: 检查“高中”文件夹是否存在
+      # 确定压缩目标路径
+      - name: 设置压缩路径
+        id: set_path
+        run: |
+          BASE="高中"
+          SUB="${{ github.event.inputs.subfolder }}"
+          if [ -n "$SUB" ]; then
+            TARGET="$BASE/$SUB"
+          else
+            TARGET="$BASE"
+          fi
+          echo "target=$TARGET" >> $GITHUB_OUTPUT
+          echo "TARGET=$TARGET" >> $GITHUB_ENV
+
+      - name: 检查目标是否存在并获取大小
         id: check
         run: |
-          if [ -d "高中" ]; then
+          TARGET="${{ steps.set_path.outputs.target }}"
+          if [ -d "$TARGET" ]; then
+            size=$(du -sb "$TARGET" | cut -f1)
             echo "exists=true" >> $GITHUB_OUTPUT
+            echo "size=$size" >> $GITHUB_OUTPUT
+            # 保守估计：若大于13GB，提醒（运行器总空间约14GB）
+            if [ $size -gt 13000000000 ]; then
+              echo "⚠️ 目标大小约 $((size/1024/1024/1024)) GB，接近运行器上限，可能失败"
+            fi
           else
             echo "exists=false" >> $GITHUB_OUTPUT
+            echo "❌ 目标路径不存在：$TARGET"
           fi
-      - name: 压缩文件夹
+
+      - name: 安装 pigz（并行压缩工具）
+        if: steps.check.outputs.exists == 'true'
+        run: sudo apt-get update && sudo apt-get install -y pigz
+
+      - name: 使用 pigz 并行压缩为 tar.gz
         if: steps.check.outputs.exists == 'true'
         run: |
-          zip -r 高中.zip 高中/
-      - name: 上传压缩包作为 Artifact
+          TARGET="${{ steps.set_path.outputs.target }}"
+          # 提取子文件夹名（若存在）用于命名
+          SUB="${{ github.event.inputs.subfolder }}"
+          if [ -n "$SUB" ]; then
+            # 将 '/' 替换为 '_' 以避免文件名非法
+            SAFE_NAME=$(echo "$SUB" | sed 's/\//_/g')
+            ARCHIVE_NAME="高中_${SAFE_NAME}.tar.gz"
+          else
+            ARCHIVE_NAME="高中_all.tar.gz"
+          fi
+          echo "ARCHIVE_NAME=$ARCHIVE_NAME" >> $GITHUB_ENV
+          tar -I pigz -cf "$ARCHIVE_NAME" -C "$(dirname "$TARGET")" "$(basename "$TARGET")"
+          echo "压缩完成，压缩包大小: $(du -h $ARCHIVE_NAME | cut -f1)"
+
+      - name: 检查压缩包大小并决定是否分块
         if: steps.check.outputs.exists == 'true'
+        run: |
+          SIZE=$(du -b ${{ env.ARCHIVE_NAME }} | cut -f1)
+          if [ $SIZE -gt 13000000000 ]; then
+            echo "压缩包超过500MB，进行分块（每块500M）"
+            split -b 13000M ${{ env.ARCHIVE_NAME }} ${{ env.ARCHIVE_NAME }}.part_
+            echo "split_done=true" >> $GITHUB_OUTPUT
+          else
+            echo "split_done=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: 上传分块文件（如果分块）
+        if: steps.check.outputs.exists == 'true' && steps.split.outputs.split_done == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: 高中压缩包
-          path: 高中.zip
-          retention-days: 7      # 保留7天，可根据需要修改
+          name: ${{ env.ARCHIVE_NAME }}_分块
+          path: ${{ env.ARCHIVE_NAME }}.part_*
+          retention-days: 7
+
+      - name: 上传完整压缩包（未分块时）
+        if: steps.check.outputs.exists == 'true' && steps.split.outputs.split_done != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARCHIVE_NAME }}
+          path: ${{ env.ARCHIVE_NAME }}
+          retention-days: 7
